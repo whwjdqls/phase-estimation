@@ -6,7 +6,7 @@ TABLE_ID = "live_demo"
 
 # (옵션) 서비스 계정 키 JSON을 사용하는 경우에만 아래 주석 해제 및 경로 입력
 # os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "./path/to/your-service-account-key.json"
-
+import matplotlib.pyplot as plt
 from google.cloud import bigquery
 import pandas as pd
 import torch
@@ -155,28 +155,71 @@ if df is not None:
         # 데이터 준비 (정규화 완료된 상태 가정)
         # final_tensor shape: (n, 7)
         data_normalized = (final_tensor.cpu() - means) / stds
-        data_normalized_tensor = data_normalized.to(device)
+        data_normalized_tensor = data_normalized.to(device).float()
 
-        # 초기 기억 (Hidden State)은 없음
-        hidden = None 
 
-        print(f"Start Live Inference (Total steps: {len(data_normalized_tensor)})")
-        print("-" * 50)
 
+        # 1. 데이터를 저장할 리스트 생성
+        history_time = []
+        history_alt = []
+        history_phase = []
+
+        # Phase Map에 따른 색상 정의 (직관적인 색상 설정)
+        phase_colors = {
+            'GND': 'black',   # 지상: 검정
+            'CL': 'red',      # 상승: 빨강
+            'CR': 'blue',     # 순항: 파랑
+            'DE': 'green',    # 하강: 초록
+            'LVL': 'orange'   # 평행비행(저고도 등): 주황
+        }
+
+        print("Collecting data for visualization...")
+
+        # 2. Loop를 돌며 데이터 수집 (기존 코드 변형)
+        hidden = None
         with torch.no_grad():
             for t in range(len(data_normalized_tensor)):
+                # 입력 준비
+                input_step = data_normalized_tensor[t].view(1, 1, -1).float()
                 
-                # (1) 현재 시점의 입력 하나 가져오기
-                # (Batch=1, Seq=1, Feature=7) 형태로 변환
-                input_step = data_normalized_tensor[t].view(1, 1, -1)
-                
-                # (2) 예측 수행 (이전 hidden을 넣고, 새 hidden을 받음)
+                # 예측
+
                 logits, hidden = model(input_step, hidden)
-                
-                # (3) 결과 해석
                 _, predicted = torch.max(logits, 1)
                 predicted_phase = idx_to_phase[predicted.item()]
                 
-                # (4) 출력 (현재 고도 등과 함께 출력하면 더 보기 좋습니다)
-                curr_alt = final_tensor[t, 0].item() # Altitude (원본 값)
+                # [중요] 아까 맨 앞에 60을 넣어서 (n,7)을 만들었으므로,
+                # 실제 Altitude 데이터는 1번 인덱스에 있습니다. (0번은 dummy 60)
+                # 만약 원본 데이터 구조가 다르다면 이 인덱스를 수정하세요.
+                curr_alt = final_tensor[t, 1].item() 
                 print(f"[Step {t:03d}] Alt: {curr_alt:.0f}ft -> Phase: {predicted_phase}")
+                # 리스트에 저장
+                history_time.append(t)
+                history_alt.append(curr_alt)
+                history_phase.append(predicted_phase)
+
+        # 3. 시각화 (Matplotlib)
+        plt.figure(figsize=(12, 6))
+
+        # (1) 전체 고도 궤적을 얇은 회색 선으로 그리기 (연결성 표현)
+        plt.plot(history_time, history_alt, color='lightgray', linewidth=1, zorder=1)
+
+        # (2) 각 시점별로 Phase에 맞는 색깔 점 찍기
+        # 산점도(Scatter)를 이용하면 점마다 다른 색을 줄 수 있습니다.
+        colors = [phase_colors[p] for p in history_phase]
+
+        plt.scatter(history_time, history_alt, c=colors, s=10, zorder=2)
+
+        # (3) 범례(Legend) 만들기 (중복 제거)
+        markers = [plt.Line2D([0,0],[0,0], color=color, marker='o', linestyle='') 
+                for color in phase_colors.values()]
+        plt.legend(markers, phase_colors.keys(), title="Flight Phase")
+
+        plt.title("Flight Phase Prediction over Altitude Profile")
+        plt.xlabel("Time Step")
+        plt.ylabel("Altitude (ft)")
+        plt.grid(True, alpha=0.3)
+
+        # 그래프 보여주기
+        # plt.show()
+        plt.savefig("flight_phase_demo.png")
